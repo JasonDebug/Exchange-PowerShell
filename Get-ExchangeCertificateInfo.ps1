@@ -3,7 +3,7 @@
 # Modified 2021MAY114
 # Last Modifier:  Jason Slaughter
 # Project Owner:  Jason Slaughter
-# Version: v1.0
+# Version: v1.0.1
 #
 
 <#
@@ -24,7 +24,8 @@
 
 [CmdletBinding()]
 param(
-    [ValidateNotNullOrEmpty()][string]$thumbprint = $(throw "Thumbprint is mandatory, please provide valid value.")
+    [ValidateNotNullOrEmpty()][string]$thumbprint = $(throw "Thumbprint is mandatory, please provide valid value."),
+    [switch]$skipVdirs
 )
 
 function LogResult {
@@ -218,45 +219,50 @@ else {
 
 LogStep "Checking cert against virtual directory settings on $(hostname)"
 
-$vdirList = @(
-	"ActiveSyncVirtualDirectory",
-	"EcpVirtualDirectory",
-	"MapiVirtualDirectory",
-	"OabVirtualDirectory",
-	"OwaVirtualDirectory",
-	"PowerShellVirtualDirectory",
-	"WebServicesVirtualDirectory"
-)
+if ($skipVdirs) {
+	LogResult "Skipping per -skipVdirs switch" -Info
+}
+else {
+	$vdirList = @(
+		"ActiveSyncVirtualDirectory",
+		"EcpVirtualDirectory",
+		"MapiVirtualDirectory",
+		"OabVirtualDirectory",
+		"OwaVirtualDirectory",
+		"PowerShellVirtualDirectory",
+		"WebServicesVirtualDirectory"
+	)
+	
+	ForEach ($vdir in $vdirList) {
+		$vdirTest = Invoke-Expression "Get-$vdir -Server (hostname)"
 
-ForEach ($vdir in $vdirList) {
-	$vdirTest = Invoke-Expression "Get-$vdir -Server (hostname)"
+		$testFailed = !(MatchCert -domain $vdirTest.InternalUrl.Host -certDomains $cert.DnsNameList)
+		LogResult "$vdir InternalUrl $($vdirTest.InternalUrl)" -Fail:$testFailed
 
-	$testFailed = !(MatchCert -domain $vdirTest.InternalUrl.Host -certDomains $cert.DnsNameList)
-	LogResult "$vdir InternalUrl $($vdirTest.InternalUrl)" -Fail:$testFailed
+		$testFailed = !(MatchCert -domain $vdirTest.ExternalUrl.Host -certDomains $cert.DnsNameList)
+		LogResult "$vdir ExternalUrl $($vdirTest.ExternalUrl)" -Fail:$testFailed
 
-	$testFailed = !(MatchCert -domain $vdirTest.ExternalUrl.Host -certDomains $cert.DnsNameList)
-	LogResult "$vdir ExternalUrl $($vdirTest.ExternalUrl)" -Fail:$testFailed
+		LogNewLine
+	}
+
+	# Outlook Anywhere (/rpc)
+	$vdirTest = Get-OutlookAnywhere -Server (hostname)
+
+	$testFailed = !(MatchCert -domain $vdirTest.InternalHostname -certDomains $cert.DnsNameList)
+	LogResult "OutlookAnywhere InternalHostname $($vdirTest.InternalHostname)" -Fail:$testFailed
+
+	$testFailed = !(MatchCert -domain $vdirTest.ExternalHostname -certDomains $cert.DnsNameList)
+	LogResult "OutlookAnywhere ExternalHostname $($vdirTest.ExternalHostname)" -Fail:$testFailed
 
 	LogNewLine
-}
 
-# Outlook Anywhere (/rpc)
-$vdirTest = Get-OutlookAnywhere -Server (hostname)
+	# Autodiscover
+	$vdirTest = Get-ClientAccessServer (hostname) -WarningAction:SilentlyContinue
 
-$testFailed = !(MatchCert -domain $vdirTest.InternalHostname -certDomains $cert.DnsNameList)
-LogResult "OutlookAnywhere InternalHostname $($vdirTest.InternalHostname)" -Fail:$testFailed
-
-$testFailed = !(MatchCert -domain $vdirTest.ExternalHostname -certDomains $cert.DnsNameList)
-LogResult "OutlookAnywhere ExternalHostname $($vdirTest.ExternalHostname)" -Fail:$testFailed
-
-LogNewLine
-
-# Autodiscover
-$vdirTest = Get-ClientAccessServer (hostname) -WarningAction:SilentlyContinue
-
-if ($vdirTest) {
-	$testFailed = !(MatchCert -domain $vdirTest.AutoDiscoverServiceInternalUri.Host -certDomains $cert.DnsNameList)
-	LogResult "AutoDiscoverServiceInternalUri $($vdirTest.AutoDiscoverServiceInternalUri)" -Fail:$testFailed
+	if ($vdirTest) {
+		$testFailed = !(MatchCert -domain $vdirTest.AutoDiscoverServiceInternalUri.Host -certDomains $cert.DnsNameList)
+		LogResult "AutoDiscoverServiceInternalUri $($vdirTest.AutoDiscoverServiceInternalUri)" -Fail:$testFailed
+	}
 }
 
 # Certutil tests
