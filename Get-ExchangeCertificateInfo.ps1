@@ -3,8 +3,13 @@
 # Modified 2021MAY114
 # Last Modifier:  Jason Slaughter
 # Project Owner:  Jason Slaughter
-# Version: v1.0.1
+# Version: v1.0.2
 #
+# CHANGELOG:
+# 
+# v1.0.0 - Initial commit
+# v1.0.1 - Added -skipVdirs switch
+# v1.0.2 - Added permissions check for the MachineKeys folder
 
 <#
 	.SYNOPSIS
@@ -189,6 +194,11 @@ else {
 	
 	LogResult "  Currently bound certificate:" -Info
 	LogCertInfo $boundCert -prefix "    " -extendedInfo
+
+    LogNewLine
+
+    LogResult "To bind this certificate to IIS, run this in EMS:" -info
+    LogResult "    Enable-ExchangeCertificate $thumbprint -Services IIS -Server (hostname)" -info
 }
 
 # Check private key
@@ -284,3 +294,69 @@ if (Test-Path $tempCert) {
 	
 	Remove-Item $tempCert
 }
+
+# Permissions checks
+$keysPath = "$env:ProgramData\Microsoft\Crypto\RSA\MachineKeys"
+LogStep "Checking ACL for $keysPath"
+
+$keysAcl = Get-Acl $keysPath
+
+$testFailed = $keysAcl.Owner -ne 'NT AUTHORITY\SYSTEM'
+
+LogResult "Owner: $($keysAcl.Owner)" -Fail:$testFailed
+
+if ($testFailed) {
+    LogResult "    The owner should be 'NT AUTHORITY\SYSTEM'" -Info
+}
+
+# Checking the Everyone ACE
+$testAclName = "Everyone"
+$testAcl = $keysAcl.Access | where { $_.IdentityReference -eq $testAclName }
+
+if ($testAcl) {
+    $expectedRights = [System.Security.AccessControl.FileSystemRights]::Write +
+        [System.Security.AccessControl.FileSystemRights]::Read +
+        [System.Security.AccessControl.FileSystemRights]::Synchronize
+
+    LogResult "'$testAclName' ACE found"
+
+    if ($testAcl.FileSystemRights -ne $expectedRights -or
+        $testAcl.AccessControlType -ne 'Allow') {
+        LogResult "    $($testAcl.FileSystemRights) does not match $expectedRights" -fail
+        LogResult "    Add '$testAclName' with Read and Write Special permissions applied to 'This folder only'." -info
+    }
+}
+else {
+    LogResult "    Missing '$testAclName' ACE" -fail
+    LogResult "    Add '$testAclName' with Read and Write Special permissions applied to 'This folder only'." -info
+}
+
+# Checking the built-in admins group ACE
+$testAclName = 'BUILTIN\Administrators'
+$testAcl = $keysAcl.Access | where { $_.IdentityReference -eq $testAclName }
+
+if ($testAcl) {
+    $expectedRights = [System.Security.AccessControl.FileSystemRights]::FullControl
+
+    LogResult "'$testAclName' ACE found"
+
+    if ($testAcl.FileSystemRights -ne $expectedRights -or
+        $testAcl.AccessControlType -ne 'Allow') {
+        LogResult "    $($testAcl.FileSystemRights) does not match $expectedRights" -fail
+        LogResult "    Add '$testAclName' with Full control permissions applied to 'This folder only'." -info
+    }
+}
+else {
+    LogResult "    Missing '$testAclName' ACE" -fail
+    LogResult "    Add '$testAclName' with Full control permissions applied to 'This folder only'." -info
+}
+
+# Check for extra ACEs
+foreach ($acl in $keysAcl.Access) {
+    if ($acl.IdentityReference -ne 'Everyone' -and
+        $acl.IdentityReference -ne 'BUILTIN\Administrators') {
+        LogResult "Additional ACE in ACL: $($acl.IdentityReference)" -fail
+    }
+}
+
+LogNewLine
