@@ -103,9 +103,6 @@ Param
     [switch]$IgnoreSsl,
 
     [Parameter(Mandatory=$false)]
-    $DomainController,
-
-    [Parameter(Mandatory=$false)]
     [switch]$IgnoreImpersonationFailure
 )
 
