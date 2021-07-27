@@ -25,7 +25,12 @@
 #
 # Changelog:
 # 
-# 16JUL2021
+# 27JUL2021
+# - Fixed issue for users with SamAccount names that differ from alias
+# - Hopefully resolved issue with errors around the add-type.  It seems to be a strange
+#   character issue with the warnings starting on line ~204
+# - Removed DomainController parameter.  It wasn't fully implemented anyway.
+# 07JUL2021
 # - Initial commit on GitHub/JasonDebug/PS_Get-Delegate
 
 <#
@@ -65,17 +70,12 @@ The TraceEnabled parameter enables EWS tracing.
 .Parameter IgnoreSsl
 The IgnoreSsl parameter specifies whether to ignore SSL validation errors.
 
-.Parameter DomainController
-The DomainController parameter specifies the fully qualified domain name (FQDN) of the domain controller that
-  retrieves data from Active Directory.
-
 Get-Delegate -Identity 2019user1@exchlab.com -UseDefaultCredentials
-	-EwsUrl
-	-Credential:$cred
-	-User
-	-UseLocalHost
-	-IgnoreSsl
-	-DomainController
+    -EwsUrl
+    -Credential:$cred
+    -User
+    -UseLocalHost
+    -IgnoreSsl
 #>
 
 [CmdletBinding(SupportsShouldProcess=$true)]
@@ -116,7 +116,7 @@ Process
     ###################
     
     ## Configure options and credentials
-	if (![string]::IsNullOrEmpty($Credential)) { $UseDefaultCredentials = $false }
+    if (![string]::IsNullOrEmpty($Credential)) { $UseDefaultCredentials = $false }
 
     ## WhatIf and Verbose will automatically be added to things like Set-ADUser
     $verbose = $PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent
@@ -147,7 +147,7 @@ Process
             
     if ((Get-Command Get-Mailbox -ErrorAction SilentlyContinue -WarningAction SilentlyContinue).Count -eq 0)
     {
-        Write-Warning 'This script must be executed in the Exchange Management Shell.  Exiting.'
+        Write-Warning "This script must be executed in the Exchange Management Shell.  Exiting."
         return
     }
 
@@ -155,9 +155,8 @@ Process
     {
         if ($UseDefaultCredentials -eq $true)
         {
-            #$Credential = @{UserName = [Environment]::UserName}
-			$Credential = New-Object PSCredential("$([Environment]::UserDomainName)\$([Environment]::UserName)", ("password" | ConvertTo-SecureString -asPlainText -Force))
-            Write-Verbose ('Using ' + [Environment]::UserDomainName + '\' + [Environment]::UserName + ' as service account. Use -Credentials to override.')
+            $Credential = New-Object PSCredential("$([Environment]::UserDomainName)\$([Environment]::UserName)", ("password" | ConvertTo-SecureString -asPlainText -Force))
+            Write-Verbose "Using '$([Environment]::UserDomainName)\$([Environment]::UserName)' as service account. Use -Credentials to override."
         }
         else
         {
@@ -168,87 +167,64 @@ Process
 
                 if (@(Get-User $Credential.UserName -ErrorAction SilentlyContinue).Count -eq 0)
                 {
-                    Write-Warning ('Unable to find user ' + $Credential.UserName + '.  Exiting.')
+                    Write-Warning "Unable to find user '$($Credential.UserName)'.  Exiting."
                     return
                 }
             }
             catch
             {
-                Write-Warning 'User invalid.  Exiting.'
+                Write-Warning "User invalid.  Exiting."
                 return
             }
         }
     }
 
-    ## Verify RBAC rights and set a single DC
-    if (![string]::IsNullOrEmpty($DomainController))
-    {
-		if ((Get-ADDomainController $DomainController -ErrorAction SilentlyContinue).Count -ne 1)
-		{
-			Write-Verbose "Unable to find specified Domain Controller $DomainController"
-			$DomainController = $null
-		}
-    }
+    ## Verify rights
+    Write-Verbose "Checking rights for $($Credential.UserName)"
     
-    Write-Verbose "Using '$DomainController' for RBAC rights lookup.  ViewEntireForest in ADServerSettings is set to $((Get-ADServerSettings).ViewEntireForest)"
+    ## Check if we're SELF
+    $self = (Get-User $Identity).SamAccountName -eq (Get-User $Credential.UserName).SamAccountName
 
-    ## DomainController parameter may be RBAC'd out, but if it's not the assumption will be we have rights to it for all relevant commands
-    if ((Get-Command Get-ManagementRoleAssignment).Parameters.ContainsKey('DomainController'))
+    if ($self)
     {
-        Write-Verbose "Checking ApplicationImpersonation RBAC role for $($Credential.UserName)"
-        $rbac = Get-ManagementRoleAssignment -RoleAssignee ($Credential.UserName) -Role ApplicationImpersonation -DomainController $DomainController -ErrorAction SilentlyContinue
+        Write-Verbose "  Should have access (SELF)"
+        $UseImpersonation = $false
+    }
+    else
+    {
+        $rbac = Get-ManagementRoleAssignment -RoleAssignee ($Credential.UserName) -Role ApplicationImpersonation -ErrorAction SilentlyContinue
         
-        ## Set DomainController to whatever gave us the RBAC rights, so we're at least consistent
-		if ($rbac.OriginatingServer.Count -gt 1)
-		{
-			$DomainController = $rbac.OriginatingServer[0]
-		}
-		else
-		{
-			$DomainController = $rbac.OriginatingServer
-		}
-		
-		## if $rbac is null we still won't have a DC
-		if ([string]::IsNullOrEmpty($DomainController))
-		{
-			$DomainController = (Get-AdServerSettings).DefaultGlobalCatalog
-		}
-		Write-Verbose "Setting DomainController to '$($rbac.OriginatingServer)'"
-	}
-	else
-	{
-		$DomainController = $null
-		Write-Verbose "Setting DomainController to `$null.  No access to -DomainController parameter in RBAC"
-	}
-    
-    if ($rbac -eq $null -or $rbac.Count -eq 0)
-    {
-		#Before warning, see if we have FullAccess rights
-		$FARights = Get-MailboxPermission $Identity -User $Credential.UserName | ? { $_.AccessRights -match "FullAccess" }
+        if ($rbac -eq $null -or $rbac.Count -eq 0)
+        {
+            #Before warning, see if we have FullAccess rights
+            $FARights = Get-MailboxPermission $Identity -User $Credential.UserName | ? { $_.AccessRights -match "FullAccess" }
 
-		if ($FARights -eq $null -or ($FARights | ? { $_.Deny -eq $true }).Count -gt 0)
-		{
-			Write-Warning ('FullAccess or ApplicationImpersonation rights not found for ' + $Credential.UserName + '.')
-			Write-Warning 'Note that if rights were recently added, it may take some time to replicate.  Use the -DomainController option to specify a DC for lookup.'
-			Write-Warning ""
-			
-			## Article about configuring impersonation
-			Write-Warning 'For more information on configuring impersonation in Exchange, go to https://msdn.microsoft.com/en-us/library/office/bb204095(v=exchg.140).aspx'
-			Write-Warning "Usage example -- New-ManagementRoleAssignment –Name:impersonationAssignmentName –Role:ApplicationImpersonation –User:serviceAccount"
-			Write-Warning ""
+            if ($FARights -eq $null -or ($FARights | ? { $_.Deny -eq $true }).Count -gt 0)
+            {
+                Write-Warning "No FullAccess or ApplicationImpersonation rights found for $($Credential.UserName)."
+                Write-Warning "Note that if rights were recently added, it may take some time to replicate."
+                Write-Warning ""
+                
+                ## Article about configuring impersonation
+                Write-Warning "For more information on configuring impersonation in Exchange, go to https://msdn.microsoft.com/en-us/library/office/bb204095(v=exchg.140).aspx"
+                Write-Warning "Usage example -- New-ManagementRoleAssignment –Name:impersonationAssignmentName –Role:ApplicationImpersonation –User:serviceAccount"
+                Write-Warning ""
 
-			## Article about management role assignments
-			Write-Warning 'For more information on the ApplicationImpersonation role, go to https://technet.microsoft.com/en-us/library/dd776119(v=exchg.150).aspx'
-			
-			return
-		}
-		
-		$UseImpersonation = $false
+                ## Article about management role assignments
+                Write-Warning "For more information on the ApplicationImpersonation role, go to https://technet.microsoft.com/en-us/library/dd776119(v=exchg.150).aspx"
+                
+                return
+            }
+            
+            $UseImpersonation = $false
+            Write-Verbose "  Should have access (FullAccess)"
+        }
+        else
+        {
+            $UseImpersonation = $true
+            Write-Verbose "  Should have access (ApplicationImpersonation)"
+        }
     }
-	else
-	{
-		$UseImpersonation = $true
-	}
     
     Write-Verbose "Using $($Credential.UserName) as service account."
 
@@ -260,9 +236,9 @@ Process
     Write-Host "Gathering mailbox info." -NoNewLine
 
     ## Get Mailbox Info
-    $Mailbox = Get-Mailbox $Identity -DomainController $DomainController
+    $Mailbox = Get-Mailbox $Identity
     Write-Host "." -NoNewLine
-    $MailboxADUser = Get-ADUser $Mailbox.Alias -Properties publicDelegates -Server $DomainController
+    $MailboxADUser = Get-ADUser $Mailbox.SamAccountName -Properties publicDelegates
     Write-Host "."
     $EmailAddress = $Mailbox.PrimarySmtpAddress.Address
     
@@ -270,9 +246,9 @@ Process
     ##  Preparing EWS settings  ##
     ##############################
 
-	## Get delegates via EWS
-	Write-Host "Getting delegates from EWS."
-	
+    ## Get delegates via EWS
+    Write-Host "Getting delegates from EWS."
+    
     ## Get the target EWS url
     ## For POX, I'm not doing AutoD.  Either specify or it's local :P
     if ($EwsUrl -ne '')
@@ -289,19 +265,19 @@ Process
     # Ignore cert errors
     if (-not ([System.Management.Automation.PSTypeName]'CertificateUtils').Type)
     {
-    add-type @"
-        using System.Net;
-        using System.Net.Security;
-        using System.Security.Cryptography.X509Certificates;
-        public static class CertificateUtils {
-            public static bool TrustAllCertsCallback(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors sslPolicyErrors) {
-                return true;
+        add-type @"
+            using System.Net;
+            using System.Net.Security;
+            using System.Security.Cryptography.X509Certificates;
+            public static class CertificateUtils {
+                public static bool TrustAllCertsCallback(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors sslPolicyErrors) {
+                    return true;
+                }
+               
+                public static void TrustAllCerts() {
+                    ServicePointManager.ServerCertificateValidationCallback = CertificateUtils.TrustAllCertsCallback;
+                }
             }
-           
-            public static void TrustAllCerts() {
-                ServicePointManager.ServerCertificateValidationCallback = CertificateUtils.TrustAllCertsCallback;
-            }
-        }
 "@
     }
 
@@ -321,31 +297,30 @@ Process
     ##  EWS calls using POX / Plain Old XML  ##
     ###########################################
 
-	if ($UseImpersonation)
-	{
-		$impersonationXml = @"
+    if ($UseImpersonation)
+    {
+        $impersonationXml = @"
+
         <t:ExchangeImpersonation>
             <t:ConnectingSID>
                 <t:PrimarySmtpAddress>$EmailAddress</t:PrimarySmtpAddress>
             </t:ConnectingSID>
         </t:ExchangeImpersonation>
 "@
-		Write-Verbose "Impersonating $EmailAddress with account $impersonationEmail"
-	}
-	else
-	{
-		$impersonationXml = $null
-	}
-	
-	$getDelegateXml = @"
+    }
+    else
+    {
+        $impersonationXml = $null
+    }
+    
+    $getDelegateXml = @"
 <?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
                xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types"
                xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
     <soap:Header>
-        <t:RequestServerVersion Version="Exchange2013_SP1" />
-$impersonationXml
+        <t:RequestServerVersion Version="Exchange2013_SP1" />$impersonationXml
     </soap:Header>
     <soap:Body>
         <m:GetDelegate IncludePermissions="true">
@@ -357,126 +332,126 @@ $impersonationXml
 </soap:Envelope>
 "@
 
-	Write-Verbose "Sending XML to $uri`:`r`n$getDelegateXml"
+    Write-Verbose "Sending XML to $uri`:`r`n$getDelegateXml"
 
-	$retry = 3
+    $retry = 3
 
-	do {
-		$result = $null
-		$content = $null
-		$error.Clear()
+    do {
+        $result = $null
+        $content = $null
+        $error.Clear()
 
-		try {
-			if ($UseDefaultCredentials)
-			{
-				Write-Verbose "...using default credentials"
-				$result = Invoke-WebRequest -Uri $uri -Method Post -Body $removalXml -ContentType "text/xml" -Headers @{'X-AnchorMailbox' = $EmailAddress} -UseDefaultCredentials
-			}
-			else
-			{
-				Write-Verbose "...using specified credentials"
-				$PSCred = [PSCredential]$Credential
-				$result = Invoke-WebRequest -Uri $uri -Method Post -Body $getDelegateXml -Headers @{'X-AnchorMailbox' = $EmailAddress} -Credential:$PSCred -ContentType "text/xml"
-			}
+        try {
+            if ($UseDefaultCredentials)
+            {
+                Write-Verbose "...using default credentials"
+                $result = Invoke-WebRequest -Uri $uri -Method Post -Body $getDelegateXml -ContentType "text/xml" -Headers @{'X-AnchorMailbox' = $EmailAddress} -UseDefaultCredentials
+            }
+            else
+            {
+                Write-Verbose "...using specified credentials"
+                $PSCred = [PSCredential]$Credential
+                $result = Invoke-WebRequest -Uri $uri -Method Post -Body $getDelegateXml -Headers @{'X-AnchorMailbox' = $EmailAddress} -Credential:$PSCred -ContentType "text/xml"
+            }
 
-			Write-Verbose "Result: $($result.StatusCode) $($result.StatusDescription)"
-			
-			## Makes it easier to do the retry check since the catch won't have $result.Content
-			$content = $result.Content
+            Write-Verbose "Result: $($result.StatusCode) $($result.StatusDescription)"
+            
+            ## Makes it easier to do the retry check since the catch won't have $result.Content
+            $content = $result.Content
 
-			if ($verbose)
-			{
-				## This pretty-prints the headers
-				$result.Headers.GetEnumerator() | % {
-					Write-Host "$($_.Key): $($_.Value)"
-				}
-				Write-Host ""
-				
-				## This pretty-prints the XML
-				([xml]$content).Save([Console]::Out)
-				Write-Host ""
-				Write-Host ""
-			}
-			
-			$resultXml = [xml]$content
-			
-			Write-Host "Delegates listed in EWS GetDelegate:"
-			Write-Host $resultXml.Envelope.Body.GetDelegateResponse.ResponseMessages.DelegateUserResponseMessageType.DelegateUser.UserId.DisplayName
-			Write-Host ""
-		}
-		catch
-		{
-			## We have to pull the response body a bit differently in this case
-			$result = $PSItem.Exception.Response
-			Write-Host "Result: $([int]$result.StatusCode) $($result.StatusDescription)"
-			
-			if ([int]$result.StatusCode -eq 0)
-			{
-				$result.StatusCode
-				$result.StatusDescription
-				$PSItem.Exception
-				return
-			}
-			
-			## This pretty-prints the headers
-			$result.Headers | % { Write-Host "$_`: $($result.GetResponseHeader($_))" };
-			Write-Host ""
-			
-			$stream = $result.GetResponseStream()
-			$stream.Position = 0
-			$reader = [System.IO.StreamReader]::new($stream)
-			$content = $reader.ReadToEnd()
-			
-			if ($content.Contains("<?xml"))
-			{
-				([xml]$content).Save([Console]::Out)
-			}
-			else
-			{
-				$content
-			}
-			Write-Host ""
-			Write-Host ""
-			
-		}
-		finally
-		{
-			$retry--
-		}
+            if ($verbose)
+            {
+                ## This pretty-prints the headers
+                $result.Headers.GetEnumerator() | % {
+                    Write-Host "$($_.Key): $($_.Value)"
+                }
+                Write-Host ""
+                
+                ## This pretty-prints the XML
+                ([xml]$content).Save([Console]::Out)
+                Write-Host ""
+                Write-Host ""
+            }
+            
+            $resultXml = [xml]$content
+            
+            Write-Host "Delegates listed in EWS GetDelegate:"
+            Write-Host $resultXml.Envelope.Body.GetDelegateResponse.ResponseMessages.DelegateUserResponseMessageType.DelegateUser.UserId.DisplayName
+            Write-Host ""
+        }
+        catch
+        {
+            ## We have to pull the response body a bit differently in this case
+            $result = $PSItem.Exception.Response
+            Write-Host "Result: $([int]$result.StatusCode) $($result.StatusDescription)"
+            
+            if ([int]$result.StatusCode -eq 0)
+            {
+                $result.StatusCode
+                $result.StatusDescription
+                $PSItem.Exception
+                return
+            }
+            
+            ## This pretty-prints the headers
+            $result.Headers | % { Write-Host "$_`: $($result.GetResponseHeader($_))" };
+            Write-Host ""
+            
+            $stream = $result.GetResponseStream()
+            $stream.Position = 0
+            $reader = [System.IO.StreamReader]::new($stream)
+            $content = $reader.ReadToEnd()
+            
+            if ($content.Contains("<?xml"))
+            {
+                ([xml]$content).Save([Console]::Out)
+            }
+            else
+            {
+                $content
+            }
+            Write-Host ""
+            Write-Host ""
+            
+        }
+        finally
+        {
+            $retry--
+        }
 
-		if ($result.StatusCode -ne 200 -or $error.Count -gt 0)
-		{
-			if ($content -match "ErrorImpersonateUserDenied")
-			{
-				## Known permanent failure
-				Write-Warning "Permanent failure.  Impersonation rights not found, but we have the RBAC right.  Likely using an admin user with explicit deny.  Exiting."
-				return
-			}
+        if ($result.StatusCode -ne 200 -or $error.Count -gt 0)
+        {
+            if ($content -match "ErrorImpersonateUserDenied")
+            {
+                ## Known permanent failure
+                Write-Warning "Permanent failure.  Impersonation rights not found, but we have the RBAC right.  Likely using an admin user with explicit deny.  Exiting."
+                return
+            }
 
-			Write-Warning "EWS call failed."
-			if ($retry -gt 0)
-			{
-				Write-Warning "Retrying..."
-			}
-			else
-			{
-				Write-Warning "Exiting."
-			}
-		}
-	}
-	while ( $retry -gt 0 -and $result.StatusCode -ne 200 -and $error.count -ne 0 )
+            Write-Warning "EWS call failed."
+            if ($retry -gt 0)
+            {
+                Write-Warning "Retrying..."
+            }
+            else
+            {
+                Write-Warning "Exiting."
+            }
+        }
+    }
+    while ( $retry -gt 0 -and $result.StatusCode -ne 200 -and $error.count -ne 0 )
 
     Write-Host "Checking publicDelegates attribute for $($Mailbox.Name)"
-    $MailboxADUser = Get-ADUser $Mailbox.Alias -Properties publicDelegates -Server $DomainController
+    $MailboxADUser = Get-ADUser $Mailbox.SamAccountName -Properties publicDelegates
     $MailboxADUser | Select -ExpandProperty publicDelegates
     Write-Host ""
     
     Write-Host "Checking calendar rights"
-    Get-MailboxFolderPermission "$($Mailbox.Alias):\calendar" -DomainController $DomainController
+    Get-MailboxFolderPermission "$($Mailbox.Alias):\calendar"
     Write-Host ""
     
     Write-Host "Checking Send-On-Behalf rights"
-    Get-Mailbox $Mailbox -DomainController $DomainController | Select GrantSendOnBehalfTo
+    Get-Mailbox $Mailbox | Select GrantSendOnBehalfTo
     Write-Host ""
 
     Write-Host "All done with $($Mailbox.Name)"
