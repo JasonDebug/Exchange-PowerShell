@@ -25,6 +25,8 @@
 #
 # Changelog:
 # 
+# 3AUG2021
+# - Changed [class]::new behavior to be more compatible with PowerShell v4 and earlier
 # 27JUL2021
 # - Fixed issue for users with SamAccount names that differ from alias
 # - Hopefully resolved issue with errors around the add-type.  It seems to be a strange
@@ -396,7 +398,7 @@ Process
             
             $stream = $result.GetResponseStream()
             $stream.Position = 0
-            $reader = [System.IO.StreamReader]::new($stream)
+            $reader = New-Object System.IO.StreamReader -ArgumentList $stream
             $content = $reader.ReadToEnd()
             
             if ($content.Contains("<?xml"))
