@@ -1,5 +1,6 @@
 # 
 # Get-Delegate.ps1
+# Source: https://github.com/JasonDebug/Exchange-PowerShell
 # 
 # Copyright (c) Microsoft Corporation
 # All rights reserved.
