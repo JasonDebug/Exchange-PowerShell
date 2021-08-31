@@ -206,7 +206,7 @@ Process
                 
                 ## Article about configuring impersonation
                 Write-Warning "For more information on configuring impersonation in Exchange, go to https://msdn.microsoft.com/en-us/library/office/bb204095(v=exchg.140).aspx"
-                Write-Warning "Usage example -- New-ManagementRoleAssignment –Name:impersonationAssignmentName –Role:ApplicationImpersonation –User:serviceAccount"
+				Write-Warning "Usage example -- New-ManagementRoleAssignment -Name:impersonationAssignmentName -Role:ApplicationImpersonation -User:serviceAccount"
                 Write-Warning ""
 
                 ## Article about management role assignments
