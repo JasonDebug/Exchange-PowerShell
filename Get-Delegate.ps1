@@ -391,7 +391,7 @@ Process
             
             $delegateUsers = $resultXml.Envelope.Body.GetDelegateResponse.ResponseMessages.DelegateUserResponseMessageType.DelegateUser
             
-            if ($delegateUsers.Count -gt 0)
+            if ($delegateUsers -ne $null)
             {
                 Write-Host "`r`nDelegates listed in EWS GetDelegate:"
                 
