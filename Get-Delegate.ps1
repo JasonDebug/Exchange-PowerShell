@@ -26,6 +26,9 @@
 #
 # Changelog:
 # 
+# 15OCT2021
+# - XML output moved to -Debug
+# - Permissions from GetDelegate are now output
 # 3AUG2021
 # - Changed [class]::new behavior to be more compatible with PowerShell v4 and earlier
 # 27JUL2021
@@ -73,6 +76,9 @@ The TraceEnabled parameter enables EWS tracing.
 .Parameter IgnoreSsl
 The IgnoreSsl parameter specifies whether to ignore SSL validation errors.
 
+.Parameter Debug
+Enables XML output for requests / responses
+
 Get-Delegate -Identity 2019user1@exchlab.com -UseDefaultCredentials
     -EwsUrl
     -Credential:$cred
@@ -119,6 +125,7 @@ Process
     if (![string]::IsNullOrEmpty($Credential)) { $UseDefaultCredentials = $false }
 
     ## WhatIf and Verbose will automatically be added to things like Set-ADUser
+    $debug = $PSCmdlet.MyInvocation.BoundParameters["Debug"].IsPresent
     $verbose = $PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent
     
     ## Check that we have ADUser from the ActiveDirectory module, and we're in EMS, before spending time doing anything else
@@ -207,7 +214,7 @@ Process
                 
                 ## Article about configuring impersonation
                 Write-Warning "For more information on configuring impersonation in Exchange, go to https://msdn.microsoft.com/en-us/library/office/bb204095(v=exchg.140).aspx"
-				Write-Warning "Usage example -- New-ManagementRoleAssignment -Name:impersonationAssignmentName -Role:ApplicationImpersonation -User:serviceAccount"
+                Write-Warning "Usage example -- New-ManagementRoleAssignment -Name:impersonationAssignmentName -Role:ApplicationImpersonation -User:serviceAccount"
                 Write-Warning ""
 
                 ## Article about management role assignments
@@ -247,7 +254,7 @@ Process
     ##############################
 
     ## Get delegates via EWS
-    Write-Host "Getting delegates from EWS."
+    Write-Host "`r`nGetting delegates from EWS..."
     
     ## Get the target EWS url
     ## For POX, I'm not doing AutoD.  Either specify or it's local :P
@@ -290,7 +297,6 @@ Process
     }
     
     ## Configure for TLS 1.2
-    #[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls12
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
     ###########################################
@@ -332,7 +338,13 @@ Process
 </soap:Envelope>
 "@
 
-    Write-Verbose "Sending XML to $uri`:`r`n$getDelegateXml"
+    if ($debug)
+    {
+        Write-Host "`r`nGetDelegate EWS request:"
+        Write-Host $getDelegateXml
+    }
+
+    Write-Verbose "Sending XML to $uri"
 
     $retry = 3
 
@@ -359,8 +371,10 @@ Process
             ## Makes it easier to do the retry check since the catch won't have $result.Content
             $content = $result.Content
 
-            if ($verbose)
+            if ($debug)
             {
+                Write-Host "`r`nGetDelegate EWS response:"
+                
                 ## This pretty-prints the headers
                 $result.Headers.GetEnumerator() | % {
                     Write-Host "$($_.Key): $($_.Value)"
@@ -375,9 +389,35 @@ Process
             
             $resultXml = [xml]$content
             
-            Write-Host "Delegates listed in EWS GetDelegate:"
-            Write-Host $resultXml.Envelope.Body.GetDelegateResponse.ResponseMessages.DelegateUserResponseMessageType.DelegateUser.UserId.DisplayName
-            Write-Host ""
+            $delegateUsers = $resultXml.Envelope.Body.GetDelegateResponse.ResponseMessages.DelegateUserResponseMessageType.DelegateUser
+            
+            if ($delegateUsers.Count -gt 0)
+            {
+                Write-Host "`r`nDelegates listed in EWS GetDelegate:"
+                
+                $allDelegates = @()
+                
+                foreach ($delegate in $resultXml.Envelope.Body.GetDelegateResponse.ResponseMessages.DelegateUserResponseMessageType.DelegateUser)
+                {
+                    $del = '' | SELECT Delegate, Calendar, Tasks, Inbox, Contacts, Notes
+                    $del.Delegate = $delegate.UserId.DisplayName
+                    $del.Calendar = $delegate.DelegatePermissions.CalendarFolderPermissionLevel
+                    $del.Tasks = $delegate.DelegatePermissions.TasksFolderPermissionLevel
+                    $del.Inbox = $delegate.DelegatePermissions.InboxFolderPermissionLevel
+                    $del.Contacts = $delegate.DelegatePermissions.ContactsFolderPermissionLevel
+                    $del.Notes = $delegate.DelegatePermissions.NotesFolderPermissionLevel
+                    $allDelegates += $del
+                }
+                $allDelegates | FT | Out-String | Write-Host
+            }
+            else
+            {
+                Write-Host "No delegates listed in XML."
+                if (!$debug)
+                {
+                    Write-Host "Use -Debug to output the raw XML from the EWS response."
+                }
+            }
         }
         catch
         {
@@ -441,18 +481,31 @@ Process
     }
     while ( $retry -gt 0 -and $result.StatusCode -ne 200 -and $error.count -ne 0 )
 
-    Write-Host "Checking publicDelegates attribute for $($Mailbox.Name)"
-    $MailboxADUser = Get-ADUser $Mailbox.SamAccountName -Properties publicDelegates
-    $MailboxADUser | Select -ExpandProperty publicDelegates
-    Write-Host ""
+    Write-Host "`r`nChecking publicDelegates attribute for $($Mailbox.Name)..."
+    $MailboxADUser = Get-ADUser $Mailbox.SamAccountName -Properties publicDelegates | Select -ExpandProperty publicDelegates
     
-    Write-Host "Checking calendar rights"
+    if ($MailboxADUser.Count -gt 0)
+    {
+        $MailboxADUser | Out-String | Write-Host
+    }
+    else
+    {
+        Write-Host "None (Empty property in AD)"
+    }
+    
+    Write-Host "`r`nChecking calendar rights..."
     Get-MailboxFolderPermission "$($Mailbox.Alias):\calendar"
-    Write-Host ""
     
-    Write-Host "Checking Send-On-Behalf rights"
-    Get-Mailbox $Mailbox | Select GrantSendOnBehalfTo
-    Write-Host ""
+    Write-Host "`r`nChecking Send-On-Behalf rights..."
+    $grantSOB = (Get-Mailbox $Mailbox).GrantSendOnBehalfTo
+    if ($grantSOB.Count -gt 0)
+    {
+        $grantSOB | FT DistinguishedName | Out-String | Write-Host
+    }
+    else
+    {
+        Write-Host "No Send-On-Behalf rights assigned."
+    }
 
-    Write-Host "All done with $($Mailbox.Name)"
+    Write-Host "`r`nAll done with $($Mailbox.Name)"
 }
