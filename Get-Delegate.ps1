@@ -357,13 +357,13 @@ Process
             if ($UseDefaultCredentials)
             {
                 Write-Verbose "...using default credentials"
-                $result = Invoke-WebRequest -Uri $uri -Method Post -Body $getDelegateXml -ContentType "text/xml" -Headers @{'X-AnchorMailbox' = $EmailAddress} -UseDefaultCredentials
+                $result = Invoke-WebRequest -Uri $uri -Method Post -Body $getDelegateXml -ContentType "text/xml" -Headers @{'X-AnchorMailbox' = $EmailAddress} -UseDefaultCredentials -UseBasicParsing
             }
             else
             {
                 Write-Verbose "...using specified credentials"
                 $PSCred = [PSCredential]$Credential
-                $result = Invoke-WebRequest -Uri $uri -Method Post -Body $getDelegateXml -Headers @{'X-AnchorMailbox' = $EmailAddress} -Credential:$PSCred -ContentType "text/xml"
+                $result = Invoke-WebRequest -Uri $uri -Method Post -Body $getDelegateXml -Headers @{'X-AnchorMailbox' = $EmailAddress} -Credential:$PSCred -ContentType "text/xml" -UseBasicParsing
             }
 
             Write-Verbose "Result: $($result.StatusCode) $($result.StatusDescription)"
